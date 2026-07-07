@@ -1,0 +1,10 @@
+host-root/
+!host-root/
+!host-root/usr/
+!host-root/usr/**
+!host-root/opt/
+!host-root/opt/**
+!host-root/var/
+!host-root/var/**
+!host-root/etc/
+!host-root/etc/**

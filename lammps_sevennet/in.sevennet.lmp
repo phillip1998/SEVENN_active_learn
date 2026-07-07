@@ -1,0 +1,25 @@
+# LAMMPS input generated for SevenNet morphology MD
+
+units           metal
+boundary        p p p
+atom_style      atomic
+atom_modify     map yes
+newton          on
+
+read_data       system.data
+
+# SevenNet potential
+pair_style      e3gnn
+pair_coeff      * * deployed_parallel C F H N O S
+
+timestep        0.00100000
+
+thermo          100
+thermo_style    custom step time temp pe ke etotal press vol
+dump            traj all custom 100 dump.sevennet.lammpstrj id type element x y z fx fy fz
+dump_modify     traj sort id element C F H N O S
+
+velocity        all create 300.000000 12345 dist gaussian mom yes rot yes
+fix             int all nvt temp 300.000000 300.000000 0.100000
+fix             com all momentum 100 linear 1 1 1
+run             1000

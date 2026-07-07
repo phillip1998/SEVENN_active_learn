@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging and test artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+logs/
+*.tmp
+*.bak
+tmp*.data
+
+# Local environment files
+.env
+.env.*
+
+# DFT API runtime jobs
+DFT_API/jobs/
+
+# Example data
+example_data/
+
+# Active-learning and MD/ML run outputs
+active_learning_loop_run/
+sampled_clusters*/
+gaussian_inputs*/
+training_dataset*/
+lammps_input*/
+active_learning_samples*/
+sevennet_finetune*/
+
+# Large/generated scientific data artifacts
+.*.xtc_offsets.npz
+*.traj
+*.db
+*.npy
+*.npz

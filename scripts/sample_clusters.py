@@ -11,6 +11,9 @@ if str(ROOT) not in sys.path:
 from mlp_md_loop.cluster_sampling import sample_dft_clusters_for_sizes
 
 
+from mlp_md_loop.solution_sampling import add_sampling_arguments, sampling_arguments
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Sample molecular dimer/trimer/tetramer clusters from GROMACS morphology snapshots."
@@ -36,12 +39,15 @@ def main() -> None:
     )
     parser.add_argument("--neighbor-pool", type=int, default=8, help="Nearest neighbors per seed")
     parser.add_argument("--contact-cutoff-nm", type=float, default=0.50, help="Heavy-atom contact cutoff")
+    add_sampling_arguments(parser)
     args = parser.parse_args()
 
+    options = sampling_arguments(args)
     results = sample_dft_clusters_for_sizes(
         gro_path=args.gro,
         xtc_path=args.xtc,
         cluster_sizes=args.cluster_sizes,
+        **options,
         n_samples=args.n_samples,
         output_dir=Path(args.output_dir),
         frame_stride=args.frame_stride,

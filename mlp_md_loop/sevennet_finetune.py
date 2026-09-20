@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import shutil
-import random
 from dataclasses import dataclass
 from pathlib import Path
+from .model_paths import resolve_checkpoint
 
 from .dataset import (
     LabeledStructure,
@@ -44,6 +44,8 @@ def prepare_sevennet_finetune(
     train_denominator: bool = False,
     require_normal_termination: bool = False,
     sevennet_label: str = "gaussian_finetune",
+    split_manifest_path: str | Path | None = None,
+    historical_split_dirs: tuple[Path, ...] = (),
 ) -> SevenNetFineTuneSetup:
     """Prepare a SevenNet pretrained-model fine-tuning work directory.
 
@@ -64,6 +66,7 @@ def prepare_sevennet_finetune(
     if huber_delta <= 0.0:
         raise ValueError("huber_delta must be positive")
 
+    pretrained = resolve_checkpoint(pretrained)
     modal = modal or _default_modal_for_pretrained(pretrained)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -95,6 +98,8 @@ def prepare_sevennet_finetune(
         valid_extxyz_path,
         valid_ratio=data_divide_ratio,
         seed=1,
+        manifest_path=Path(split_manifest_path) if split_manifest_path is not None else output / "split_manifest.json",
+        historical_dirs=historical_split_dirs,
     )
 
     write_sevennet_structure_list(
@@ -230,24 +235,16 @@ def _write_train_valid_extxyz(
     valid_path: Path,
     valid_ratio: float,
     seed: int,
+    manifest_path: Path | None = None,
+    historical_dirs: tuple[Path, ...] = (),
 ) -> bool:
-    blocks = _read_extxyz_blocks(source)
-    if len(blocks) < 2 or valid_ratio <= 0.0:
-        shutil.copyfile(source, train_path)
-        valid_path.write_text("", encoding="utf-8", newline="\n")
-        return False
+    from .persistent_split import write_persistent_split
 
-    n_valid = max(1, round(len(blocks) * valid_ratio))
-    n_valid = min(n_valid, len(blocks) - 1)
-    indices = list(range(len(blocks)))
-    random.Random(seed).shuffle(indices)
-    valid_indices = set(indices[:n_valid])
-
-    train_blocks = [block for idx, block in enumerate(blocks) if idx not in valid_indices]
-    valid_blocks = [block for idx, block in enumerate(blocks) if idx in valid_indices]
-    train_path.write_text("".join(train_blocks), encoding="utf-8", newline="\n")
-    valid_path.write_text("".join(valid_blocks), encoding="utf-8", newline="\n")
-    return True
+    return write_persistent_split(
+        _read_extxyz_blocks(source), train_path, valid_path,
+        manifest_path=manifest_path if manifest_path is not None else train_path.parent / "split_manifest.json",
+        valid_ratio=valid_ratio, seed=seed, historical_dirs=historical_dirs,
+    )
 
 
 def _fine_tune_yaml(

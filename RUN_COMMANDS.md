@@ -1,5 +1,182 @@
 # MLP-MD Loop 실행 명령어 모음
 
+## 분석용 whole.xtc / whole.gro 출력
+
+MD 종료 후 경계에서 끊긴 분자를 결합 정보로 복원하고, 분자의 기하 중심을 box 안으로
+이동한 분석용 XTC를 추가 생성할 수 있습니다. 기존 force 포함 dump와 다음 MD용
+`final.data`는 그대로 사용합니다. XTC 지원 LAMMPS 빌드는 필요하지 않으며 MDAnalysis로 변환합니다.
+
+```toml
+[md]
+export_whole_xtc = true
+analysis_topology_path = "/data/mixture.tpr"
+```
+
+TPR은 `gro_path`와 원자 수/순서/이름 및 residue 구성이 같고 분자 내부 결합이 있어야 합니다.
+virtual site가 추가된 TPR 등 원자 수가 다른 파일은 사용할 수 없습니다.
+GRO만으로 결합을 자동 추정하지 않습니다. 분자 한 개가 residue 한 개라는 현재 프로젝트 전제를
+검사하며, 결합이 불완전하거나 여러 residue에 걸친 분자는 오류로 처리합니다.
+TPR이 아직 준비되지 않았으면 기본값인 `export_whole_xtc = false`로 두세요.
+
+각 iteration의 `md/`에 다음 결과가 생성됩니다.
+
+- `whole.xtc`: 모든 dump frame을 분자 단위로 PBC 처리한 trajectory
+- `whole.gro`: 같은 원자 순서의 첫 번째 보정 frame (reference 구조)
+- `whole_export.json`: frame/atom 수, 시간 범위 및 처리 방식
+
+기존 dump 파일만 따로 변환하려면:
+
+```bash
+python scripts/export_whole_trajectory.py \
+  --dump active_learning_run01/iter_0000/md/dump.sevennet.lammpstrj \
+  --reference-gro /data/mixture.gro \
+  --topology /data/mixture.tpr \
+  --timestep-ps 0.001 \
+  --output-dir active_learning_run01/iter_0000/md
+```
+
+`--timestep-ps`는 dump 간격이 아닌 LAMMPS 한 step의 시간입니다. 예를 들어 1 fs timestep,
+100-step dump 간격이면 `0.001`을 지정하며 XTC frame 간격은 0.1 ps가 됩니다.
+좌표는 LAMMPS `units metal` 기준으로 읽고 XTC에서는 nm로 저장합니다.
+시간은 각 iteration의 local step에 기반하며 iteration별 파일의 시간을 자동 연결하지 않습니다.
+
+분자 중심을 box 안에 배치하기 때문에 일부 원자가 box 밖에 있어도 정상입니다.
+이 결과는 분자 내부가 끊기지 않는 시각화/구조 분석용이며, 분자가 box를 건널 때 중심 위치는
+다시 wrapping됩니다. 확산/MSD 분석용 시간축 no-jump trajectory는 아닙니다.
+고정 결합 topology를 사용하므로 반응에 의해 결합이 바뀌는 trajectory의 연결성을 자동 판별하지 않습니다.
+
+자동 loop는 설정한 topology를 MD 전에 검사합니다. MD 후 변환 과정에서 오류가 나면
+`whole_export_error.json`과 경고를 남기고 완료된 MD와 loop 진행은 유지합니다.
+원인을 고친 뒤 위 독립 변환 명령으로 재시도할 수 있습니다.
+`execute_md = false`로 MD를 수동 실행한 경우에도 독립 변환 명령을 사용하세요.
+
+## Iteration 간 고정 분할과 MD 이어 실행
+
+현재 loop는 `work_dir/split_manifest.json`에 구조별 train/validation 소속을 저장합니다.
+기존 구조는 소속을 유지하고 새 구조만 추가 배정합니다. 파일명이나 복사 경로가 바뀌어도
+원소와 원자 간 거리(소수점 6자리)로 구조를 식별하며, 같은 기하 구조의 중복은 제거합니다.
+원자 순서, 평행이동, 회전에 영향받지 않는 거리 기반 ID를 사용하지만, 유사 구조 및
+같은 trajectory에서 나온 상관된 구조 전체를 묶는 기능은 아닙니다.
+
+- `[finetune].data_divide_ratio`는 새 manifest를 만들 때의 목표 비율입니다. 이후에는
+  manifest에 기록된 비율과 seed를 유지해야 하며, 기존 소속을 바꿔 비율을 맞추지 않습니다.
+- 각 `finetune/split_summary.json`에 train/valid 개수와 중복 제거 개수를 기록합니다.
+- validation에는 새 데이터가 추가될 수 있으므로 평가군 전체가 완전히 고정되는 것은 아닙니다.
+  고정되는 것은 기존 구조의 소속입니다.
+- 기존 실행을 이어갈 때 manifest가 없으면 과거 `train.extxyz`/`valid.extxyz`를 읽어
+  소속을 복원합니다. 과거 train과 valid 양쪽에 등장한 구조가 있으면 leakage 오류로 중단합니다.
+  새 work_dir와 오염되지 않은 checkpoint로 다시 시작해야 합니다.
+- 외부에서 학습된 checkpoint의 학습 데이터 이력은 자동 확인할 수 없습니다.
+  manifest와 과거 split 파일을 보존하세요. 같은 work_dir에 loop를 중복 실행하지 마세요.
+
+독립 fine-tuning 준비 명령으로 여러 batch를 만들 때도 같은 manifest를 지정합니다.
+
+```bash
+python scripts/prepare_sevennet_finetune.py \
+  --logs gaussian_logs_total_batch02 --output-dir sevennet_finetune_batch02 \
+  --pretrained /models/checkpoint_best.pth \
+  --split-manifest /data/al_run/split_manifest.json
+```
+
+MD는 `[md]`에서 시작 방식을 선택합니다. 기본값은 `previous`입니다.
+
+```toml
+[md]
+start_mode = "previous"
+```
+
+- iteration 0: 원본 GRO에서 시작하고 초기 속도를 생성합니다.
+- iteration 1 이후: 직전 `md/final.data`의 좌표, 셀, 속도, 원자 ID/type을 사용합니다.
+  초기 속도를 다시 생성하지 않으며, 새로운 SevenNet 모델을 적용합니다.
+  이번 iteration에 새 모델이 없으면 가장 최근 배포된 fine-tuning 모델을 사용합니다.
+- `final.data`는 `run`/`minimize`가 끝난 뒤 `write_data final.data nocoeff`로 저장합니다.
+  이후 `md.complete` 완료 표시를 씁니다. 마지막 dump 간격과 무관하게 마지막 상태를 저장합니다.
+- `md_context.json`에 기준 GRO 및 원소 매핑을 기록합니다. 이전 상태가 없거나 완료 표시가 없거나,
+  원자 수/ID/type, 속도, 셀 검증에 실패하면 원본 GRO로 돌아가지 않고 중단합니다.
+- binary restart가 아니므로 thermostat 내부 상태는 초기화되고 timestep 번호도 매 iteration
+  다시 시작합니다. 새 potential에서 이어가는 MD 구간이며 단일 trajectory의 완전한 restart는 아닙니다.
+- `execute_md = false`로 준비만 했다면 생성된 `md/run_md.sh`를 성공적으로 실행한 뒤
+  다음 iteration을 실행해야 합니다. dry-run은 실제 실행과 별도 work_dir에서 한 번씩 확인하세요.
+- 예전 코드로 만든 MD에는 `final.data`와 완료 표시가 없으므로 바로 이어받을 수 없습니다.
+  새 실행을 시작하거나 새 코드가 생성한 MD 입력으로 이전 구간의 최종 상태를 준비해야 합니다.
+
+기존처럼 매번 원본 GRO에서 시작하려면 명시적으로 `start_mode = "initial"`을 사용합니다.
+
+## Film / solution 샘플링 선택 (서버 CLI)
+
+기본값은 `film`이며 기존 샘플링을 유지합니다. `solution`은 GRO의 residue 이름으로
+용질/용매를 구분하고 조성별로 샘플을 선택합니다. 초기 GRO/XTC와 이후 MD dump에 모두 적용됩니다.
+
+자동 loop 설정의 기존 `[sampling]`에 아래 항목을 추가하거나 수정합니다.
+`A`, `B`는 실제 GRO의 대소문자까지 일치하는 residue 이름으로 바꾸세요.
+
+```toml
+[sampling]
+mode = "solution"  # film 또는 solution
+solute_resnames = ["A"]
+solvent_resnames = ["B"]
+solution_solute_weights = { "0" = 0.25, "1" = 0.75 }
+```
+
+가중치의 키는 **cluster 안의 용질 분자 수**이며, cluster 크기별로 따로 적용됩니다.
+dimer 20개면 용매–용매 5개와 용질–용매 15개, trimer 20개면 용매 3개짜리 5개와
+용질 1개+용매 2개짜리 15개를 요청합니다. 용질–용질도 포함하려면 `"2" = 0.1`처럼
+가중치를 추가하세요. cluster 크기보다 큰 용질 개수는 제외하고 나머지 가중치를 정규화합니다.
+정수 할당은 최대 나머지 방식이라 적은 샘플 수에서는 일부 조성의 할당량이 0일 수 있습니다.
+
+```bash
+python scripts/run_active_learning_loop.py --conf active_learning_loop.server.toml
+```
+
+초기 GRO/XTC에서 직접 추출:
+
+```bash
+python scripts/sample_clusters.py \
+  --gro mixture.gro --xtc mixture.xtc \
+  --sampling-mode solution \
+  --solute-resnames A --solvent-resnames B \
+  --solution-solute-weights '0:0.25,1:0.75' \
+  --cluster-sizes 2 3 --n-samples 20 \
+  --output-dir solution_initial
+```
+
+`--xtc`를 생략하면 GRO snapshot만 사용합니다. MD dump에서 직접 추출:
+
+```bash
+python scripts/sample_active_learning.py \
+  --dump dump.sevennet.lammpstrj --reference-gro mixture.gro \
+  --sampling-mode solution \
+  --solute-resnames A --solvent-resnames B \
+  --solution-solute-weights '0:0.25,1:0.75' \
+  --cluster-sizes 2 3 --n-samples 20 \
+  --output-dir solution_active
+```
+
+기존 방식은 `--sampling-mode film` 또는 옵션 생략으로 사용합니다.
+
+solution의 선택 규칙:
+
+- 혼합 cluster에서는 모든 용질을 seed로 검사합니다. MD의 `candidate_seeds_per_frame`은
+  용매만 있는 cluster의 용매 seed에만 적용됩니다.
+- seed와 heavy-atom 접촉 cutoff 이내에 있는 분자로 cluster를 구성합니다.
+  `neighbor_pool`은 용질/용매 각각의 가장 가까운 접촉 이웃 수를 제한합니다.
+  모든 구성 분자가 seed에 접촉하는 구조를 선택하며 긴 사슬 모양의 접촉 전체를 열거하지는 않습니다.
+- 초기 샘플링은 pi-stacking 점수를 제외하고 contact, compactness와 다양성을 사용합니다.
+  MD 후보 점수는 용질 개수가 같은 후보군 안에서 정규화합니다. committee uncertainty는 아닙니다.
+- 각 크기별 폴더의 `sampling_report.json`에 조성별 요청/후보/선택/부족 수와
+  sample별 residue 이름, 조성, 원자 수를 기록합니다.
+- 후보가 부족하면 경고와 보고서를 남기며 다른 조성으로 자동 재배정하지 않습니다.
+  모든 후보가 없으면 빈 메타데이터를 저장하고 loop의 DFT 제출을 건너뜁니다.
+- 누락된 residue 이름, 존재하지 않는 이름, 용질/용매 중복 지정은 오류로 처리합니다.
+- 원자 간 거리 계산 비용이 있으므로 큰 용매계는 적은 frame 수로 먼저 확인하세요.
+  초기 샘플러는 모든 용매 seed를 검사합니다.
+
+한 residue가 한 분자라는 전제, 원자 이름 기반 원소 추정, 직교 셀 PBC,
+Gaussian의 공통 charge/multiplicity 설정은 기존과 같습니다. 이 옵션은 virtual site 처리,
+triclinic 셀 또는 classical 용매와의 hybrid MD를 추가하지 않습니다.
+다른 설정으로 재실행할 때는 이전 XYZ가 섞이지 않도록 새 output 폴더를 사용하세요.
+dry-run은 실제 실행과 별도 `work_dir`에서 수행하세요.
+
 이 문서는 지금까지 만든 파이프라인을 처음부터 따라 실행하기 위한 명령어 모음입니다.
 
 기본 작업 폴더는 아래라고 가정합니다.

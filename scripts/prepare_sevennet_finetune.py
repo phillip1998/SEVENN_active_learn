@@ -96,6 +96,7 @@ def main() -> None:
         default="gaussian_finetune",
         help="Label used in the generated structure_list",
     )
+    parser.add_argument("--split-manifest", help="Shared persistent split manifest for successive datasets")
     args = parser.parse_args()
 
     setup = prepare_sevennet_finetune(
@@ -115,6 +116,7 @@ def main() -> None:
         train_denominator=args.train_denominator,
         require_normal_termination=args.require_normal_termination,
         sevennet_label=args.sevennet_label,
+        split_manifest_path=args.split_manifest,
     )
 
     print(f"Prepared SevenNet fine-tuning directory: {setup.output_dir}")

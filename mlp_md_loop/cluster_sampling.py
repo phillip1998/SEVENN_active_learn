@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
+from .solution_sampling import validate_sampling, solution_candidates, select_solution
+
+
 Vector = tuple[float, float, float]
 
 
@@ -85,6 +88,10 @@ def sample_dft_clusters(
     min_distance_reject_nm: float = 0.08,
     random_seed: int = 7,
     write_xyz: bool = True,
+    sampling_mode: str = "film",
+    solute_resnames: Sequence[str] = (),
+    solvent_resnames: Sequence[str] = (),
+    solution_solute_weights: dict[int, float] | None = None,
 ) -> list[ClusterSample]:
     """Sample dimer/trimer/tetramer-like molecular clusters for DFT labeling.
 
@@ -133,6 +140,7 @@ def sample_dft_clusters(
     output_dir = Path(output_dir)
 
     atoms, molecules, gro_frame = read_gro(gro_path)
+    validate_sampling(sampling_mode, solute_resnames, solvent_resnames, solution_solute_weights, molecules)
     frames = _load_frames(
         gro_path,
         xtc_path,
@@ -146,6 +154,20 @@ def sample_dft_clusters(
     rng = random.Random(random_seed)
     candidates: list[_Candidate] = []
     for frame in frames:
+        if sampling_mode == "solution":
+            geometries = _molecule_geometries(frame, molecules)
+            pair_cache = {}
+            for indices in solution_candidates(frame, molecules, cluster_size, neighbor_pool,
+                    contact_cutoff_nm, solute_resnames, solution_solute_weights, rng):
+                candidate = _score_candidate(frame, molecules, geometries, indices,
+                    contact_cutoff_nm, min_distance_reject_nm, pair_cache)
+                if candidate is not None:
+                    # Solution ranking omits the film-specific pi-stacking proxy.
+                    candidate.score = (0.5 * min(candidate.avg_contact_count / 18.0, 1.0)
+                        + 0.5 / (1.0 + candidate.avg_pair_com_distance_nm))
+                    candidate.feature = candidate.feature[:-1]
+                    candidates.append(candidate)
+            continue
         candidates.extend(
             _frame_candidates(
                 frame=frame,
@@ -158,13 +180,15 @@ def sample_dft_clusters(
             )
         )
 
-    if not candidates:
+    if not candidates and sampling_mode == "film":
         raise RuntimeError(
             "No valid clusters were found. Try increasing contact_cutoff_nm or "
             "neighbor_pool, or check whether molecules are wrapped across PBC."
         )
 
-    selected = _select_diverse_candidates(candidates, n_samples)
+    selected = (select_solution(candidates, molecules, solute_resnames, cluster_size,
+        solution_solute_weights, n_samples, _select_diverse_candidates, output_dir)
+        if sampling_mode == "solution" else _select_diverse_candidates(candidates, n_samples))
     output_dir.mkdir(parents=True, exist_ok=True)
 
     samples: list[ClusterSample] = []
@@ -714,7 +738,7 @@ def _write_metadata(output_dir: Path, samples: Sequence[ClusterSample]) -> None:
         handle.write("\n")
 
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(asdict(samples[0]).keys()))
+        writer = csv.DictWriter(handle, fieldnames=list(ClusterSample.__dataclass_fields__))
         writer.writeheader()
         for sample in samples:
             row = asdict(sample)

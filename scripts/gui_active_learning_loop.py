@@ -132,6 +132,15 @@ class ActiveLearningGui(QMainWindow):
         grid = QGridLayout(page)
         basic = QGroupBox("Counts")
         form = QFormLayout(basic)
+        self.sampling_mode = QComboBox()
+        self.sampling_mode.addItems(["film", "solution"])
+        self.solute_resnames = QLineEdit()
+        self.solvent_resnames = QLineEdit()
+        self.solution_solute_weights = QLineEdit()
+        form.addRow("Sampling mode", self.sampling_mode)
+        form.addRow("Solute resnames", self.solute_resnames)
+        form.addRow("Solvent resnames", self.solvent_resnames)
+        form.addRow("Solute count weights", self.solution_solute_weights)
         self.initial_total = int_spin(1, 1_000_000, 24)
         self.min_total = int_spin(0, 1_000_000, 4)
         self.max_total = int_spin(1, 1_000_000, 96)
@@ -183,6 +192,10 @@ class ActiveLearningGui(QMainWindow):
         form = QFormLayout(page)
         self.md_gro_path = PathEdit()
         self.md_xtc_path = PathEdit()
+        self.md_start_mode = QComboBox()
+        self.md_start_mode.addItems(["previous", "initial"])
+        self.md_export_whole_xtc = QCheckBox("Export whole-molecule XTC after MD")
+        self.md_analysis_topology = PathEdit()
         self.md_model_path = PathEdit()
         self.md_modal = QLineEdit()
         self.md_pair_style = QComboBox()
@@ -204,6 +217,9 @@ class ActiveLearningGui(QMainWindow):
         self.md_run_command.setMinimumHeight(96)
         form.addRow("GRO path", self.md_gro_path)
         form.addRow("XTC path", self.md_xtc_path)
+        form.addRow("MD start mode", self.md_start_mode)
+        form.addRow("Analysis XTC", self.md_export_whole_xtc)
+        form.addRow("Analysis topology (TPR)", self.md_analysis_topology)
         form.addRow("Model path", self.md_model_path)
         form.addRow("Modal", self.md_modal)
         form.addRow("Pair style", self.md_pair_style)
@@ -829,6 +845,10 @@ class ActiveLearningGui(QMainWindow):
         self.dft_nprocshared.setValue(int(dft.get("nprocshared", 16)))
         self.dft_submit.setChecked(bool(dft.get("submit", True)))
 
+        self.sampling_mode.setCurrentText(str(sampling.get("mode", "film")))
+        self.solute_resnames.setText(join_list(sampling.get("solute_resnames", [])))
+        self.solvent_resnames.setText(join_list(sampling.get("solvent_resnames", [])))
+        self.solution_solute_weights.setText(join_weights(sampling.get("solution_solute_weights", {"0": 0.25, "1": 0.75})))
         self.initial_total.setValue(int(sampling.get("initial_total", 24)))
         self.min_total.setValue(int(sampling.get("min_total", 4)))
         self.max_total.setValue(int(sampling.get("max_total", 96)))
@@ -847,6 +867,9 @@ class ActiveLearningGui(QMainWindow):
         self.hard_reject_distance.setValue(float(sampling.get("hard_reject_distance_angstrom", 0.55)))
         self.random_seed.setValue(int(sampling.get("random_seed", 17)))
 
+        self.md_export_whole_xtc.setChecked(bool(md.get("export_whole_xtc", False)))
+        self.md_analysis_topology.setText(str(md.get("analysis_topology_path", "")))
+        self.md_start_mode.setCurrentText(str(md.get("start_mode", "previous")))
         self.md_gro_path.setText(str(md.get("gro_path", "YCOL160.gro")))
         self.md_xtc_path.setText("" if md.get("xtc_path") is None else str(md.get("xtc_path")))
         self.md_model_path.setText(str(md.get("model_path", "7net-omni")))
@@ -903,6 +926,10 @@ class ActiveLearningGui(QMainWindow):
                 "submit": self.dft_submit.isChecked(),
             },
             "sampling": {
+                "mode": self.sampling_mode.currentText(),
+                "solute_resnames": parse_list(self.solute_resnames.text()),
+                "solvent_resnames": parse_list(self.solvent_resnames.text()),
+                "solution_solute_weights": parse_weights(self.solution_solute_weights.text()),
                 "initial_total": self.initial_total.value(),
                 "min_total": self.min_total.value(),
                 "max_total": self.max_total.value(),
@@ -922,6 +949,9 @@ class ActiveLearningGui(QMainWindow):
                 "random_seed": self.random_seed.value(),
             },
             "md": {
+                "start_mode": self.md_start_mode.currentText(),
+                "export_whole_xtc": self.md_export_whole_xtc.isChecked(),
+                "analysis_topology_path": self.md_analysis_topology.text(),
                 "gro_path": self.md_gro_path.text().strip(),
                 "xtc_path": none_if_empty(self.md_xtc_path.text()),
                 "model_path": self.md_model_path.text().strip(),

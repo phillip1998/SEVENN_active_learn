@@ -10,6 +10,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from .solution_sampling import validate_sampling, solution_candidates, select_solution
+
 from .cluster_sampling import (
     AtomRecord,
     FrameData,
@@ -90,6 +92,10 @@ def sample_active_learning_clusters(
     random_seed: int = 17,
     write_xyz: bool = True,
     progress: bool = False,
+    sampling_mode: str = "film",
+    solute_resnames: Sequence[str] = (),
+    solvent_resnames: Sequence[str] = (),
+    solution_solute_weights: dict[int, float] | None = None,
 ) -> list[ActiveLearningSample]:
     """Sample MD snapshots that are useful candidates for active learning.
 
@@ -114,6 +120,7 @@ def sample_active_learning_clusters(
         raise ValueError("hard_reject_distance_angstrom must be non-negative")
 
     atoms, molecules, _ = read_gro(reference_gro)
+    validate_sampling(sampling_mode, solute_resnames, solvent_resnames, solution_solute_weights, molecules)
     frames = read_lammps_dump(
         dump_path,
         frame_stride=frame_stride,
@@ -149,6 +156,20 @@ def sample_active_learning_clusters(
                 len(candidates),
             ),
         )
+        if sampling_mode == "solution":
+            geometry_frame = FrameData(frame.frame_index, None, frame.positions_nm, frame.box_nm)
+            geometries = _molecule_geometries(geometry_frame, molecules)
+            pair_cache = {}
+            for indices in solution_candidates(frame, molecules, cluster_size, neighbor_pool,
+                    contact_cutoff_angstrom / 10.0, solute_resnames, solution_solute_weights,
+                    rng, candidate_seeds_per_frame):
+                candidate = _score_active_candidate(frame, geometry_frame, molecules,
+                    geometries, indices, contact_cutoff_angstrom / 10.0,
+                    close_contact_alert_angstrom / 10.0,
+                    hard_reject_distance_angstrom / 10.0, pair_cache)
+                if candidate is not None:
+                    candidates.append(candidate)
+            continue
         frame_candidates = _frame_active_candidates(
             frame=frame,
             molecules=molecules,
@@ -174,16 +195,20 @@ def sample_active_learning_clusters(
             ),
         )
 
-    if not candidates:
+    if not candidates and sampling_mode == "film":
         raise RuntimeError(
             "No active-learning candidates were found. Try increasing "
             "neighbor_pool/contact_cutoff_angstrom or lowering the hard reject distance."
         )
 
     _progress(progress, f"[active-learning] assigning scores to {len(candidates)} candidate(s)")
-    _assign_active_scores(candidates)
+    if sampling_mode == "film":
+        _assign_active_scores(candidates)
     _progress(progress, f"[active-learning] selecting {n_samples} diverse sample(s)")
-    selected = _select_diverse_active_candidates(candidates, n_samples)
+    selected = (select_solution(candidates, molecules, solute_resnames, cluster_size,
+        solution_solute_weights, n_samples, _select_diverse_active_candidates, output_dir,
+        score_group=_assign_active_scores) if sampling_mode == "solution"
+        else _select_diverse_active_candidates(candidates, n_samples))
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -850,7 +875,7 @@ def _write_active_metadata(output_dir: Path, samples: Sequence[ActiveLearningSam
         handle.write("\n")
 
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(asdict(samples[0]).keys()))
+        writer = csv.DictWriter(handle, fieldnames=list(ActiveLearningSample.__dataclass_fields__))
         writer.writeheader()
         for sample in samples:
             row = asdict(sample)

@@ -11,6 +11,9 @@ if str(ROOT) not in sys.path:
 from mlp_md_loop.active_learning import sample_active_learning_clusters_for_sizes
 
 
+from mlp_md_loop.solution_sampling import add_sampling_arguments, sampling_arguments
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Sample active-learning DFT candidates from a SevenNet LAMMPS trajectory."
@@ -41,7 +44,7 @@ def main() -> None:
         help="Randomly sample this many seed molecules per selected frame before neighbor search",
     )
     parser.add_argument("--quiet", action="store_true", help="Hide progress messages")
-    parser.add_argument("--neighbor-pool", type=int, default=8, help="Nearest COM neighbors per seed molecule")
+    parser.add_argument("--neighbor-pool", type=int, default=8, help="Neighbor pool (film: COM; solution: heavy-atom contact, per species group)")
     parser.add_argument(
         "--contact-cutoff-angstrom",
         type=float,
@@ -61,12 +64,15 @@ def main() -> None:
         help="Reject geometrically corrupted clusters below this heavy-atom distance",
     )
     parser.add_argument("--random-seed", type=int, default=17, help="Deterministic tie-breaking seed")
+    add_sampling_arguments(parser)
     args = parser.parse_args()
 
+    options = sampling_arguments(args)
     results = sample_active_learning_clusters_for_sizes(
         dump_path=args.dump,
         reference_gro=args.reference_gro,
         cluster_sizes=args.cluster_sizes,
+        **options,
         n_samples=args.n_samples,
         output_dir=args.output_dir,
         frame_stride=args.frame_stride,

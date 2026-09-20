@@ -18,10 +18,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from .solution_sampling import validate_sampling
 from .active_learning import sample_active_learning_clusters
 from .cluster_sampling import sample_dft_clusters
 from .gaussian import convert_xyz_to_gjf_batch, write_gaussian_manifest
-from .lammps import prepare_sevennet_lammps_from_gro
+from .lammps import prepare_sevennet_lammps_from_gro, completed_md_data
+from .model_paths import resolve_checkpoint
 from .sevennet_finetune import prepare_sevennet_finetune
 
 
@@ -50,6 +52,14 @@ class DftApiConfig:
 
 @dataclass(frozen=True)
 class SamplingConfig:
+    mode: str = "film"
+    solute_resnames: tuple[str, ...] = ()
+    solvent_resnames: tuple[str, ...] = ()
+    solution_solute_weights: dict[int, float] = field(default_factory=lambda: {0: 0.25, 1: 0.75})
+
+    def __post_init__(self):
+        validate_sampling(self.mode, self.solute_resnames, self.solvent_resnames, self.solution_solute_weights)
+
     initial_total: int = 24
     min_total: int = 4
     max_total: int = 96
@@ -72,6 +82,7 @@ class SamplingConfig:
 @dataclass(frozen=True)
 class MdConfig:
     gro_path: str
+    start_mode: str = "previous"
     xtc_path: str | None = None
     model_path: str = "7net-omni"
     modal: str = "omol25_low"
@@ -89,6 +100,8 @@ class MdConfig:
     d3: bool = False
     run_command: str | None = DEFAULT_MD_RUN_COMMAND
     expected_dump: str = "dump.sevennet.lammpstrj"
+    export_whole_xtc: bool = False
+    analysis_topology_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -271,6 +284,19 @@ def run_one_iteration(
     dry_run: bool,
     progress: bool,
 ) -> None:
+    if config.md.export_whole_xtc:
+        from .trajectory_export import load_analysis_topology
+        if not config.md.analysis_topology_path:
+            raise ValueError("md.export_whole_xtc requires md.analysis_topology_path (matching bonded topology/TPR)")
+        analysis_topology = load_analysis_topology(config.md.analysis_topology_path, config.md.gro_path)
+        if hasattr(analysis_topology, "trajectory"):
+            analysis_topology.trajectory.close()
+    continuation_data = None
+    if config.md.start_mode not in ("initial", "previous"):
+        raise ValueError("md.start_mode must be 'initial' or 'previous'")
+    if config.md.start_mode == "previous" and state.iteration > 0:
+        continuation_data = completed_md_data(
+            work_dir / f"iter_{state.iteration - 1:04d}" / "md", config.md.gro_path)
     iteration_dir = work_dir / f"iter_{state.iteration:04d}"
     iteration_dir.mkdir(parents=True, exist_ok=True)
 
@@ -280,6 +306,10 @@ def run_one_iteration(
         cluster_sizes=config.sampling.cluster_sizes,
         weights=cluster_weights_for_iteration(config.sampling, state.iteration, state.no_improvement_steps),
     )
+    sampling_options = dict(sampling_mode=config.sampling.mode,
+        solute_resnames=config.sampling.solute_resnames,
+        solvent_resnames=config.sampling.solvent_resnames,
+        solution_solute_weights=config.sampling.solution_solute_weights)
     samples_dir = iteration_dir / "samples"
     sampled = False
     if state.iteration == 0 and config.md.xtc_path:
@@ -287,7 +317,8 @@ def run_one_iteration(
         for cluster_size, n_samples in counts.items():
             if n_samples <= 0:
                 continue
-            sample_dft_clusters(
+            selected_samples = sample_dft_clusters(
+                **sampling_options,
                 gro_path=config.md.gro_path,
                 xtc_path=config.md.xtc_path,
                 cluster_size=cluster_size,
@@ -301,7 +332,7 @@ def run_one_iteration(
                 min_distance_reject_nm=config.sampling.hard_reject_distance_angstrom / 10.0,
                 random_seed=config.sampling.random_seed + state.iteration + cluster_size,
             )
-            sampled = True
+            sampled = sampled or bool(selected_samples)
     else:
         sampler_kind = "md_dump"
         dump_path = work_dir / f"iter_{state.iteration - 1:04d}" / "md" / config.md.expected_dump
@@ -312,7 +343,8 @@ def run_one_iteration(
                 _log(progress, f"[loop] sampling {n_samples} clusters of size {cluster_size} from previous MD dump")
                 if n_samples <= 0:
                     continue
-                sample_active_learning_clusters(
+                selected_samples = sample_active_learning_clusters(
+                    **sampling_options,
                     dump_path=dump_path,
                     reference_gro=config.md.gro_path,
                     cluster_size=cluster_size,
@@ -329,8 +361,11 @@ def run_one_iteration(
                     random_seed=config.sampling.random_seed + state.iteration + cluster_size,
                     progress=progress,
                 )
-                sampled = True
+                sampled = sampled or bool(selected_samples)
 
+    _write_iteration_manifest(iteration_dir, sampler_kind, counts, config, state)
+    if not sampled:
+        _log(progress, "[loop] no samples selected; skipping DFT submission")
     if sampled:
         gjf_dir = iteration_dir / "gjf"
         gaussian_inputs = convert_xyz_to_gjf_batch(
@@ -343,7 +378,6 @@ def run_one_iteration(
             nprocshared=config.dft.nprocshared,
         )
         write_gaussian_manifest(iteration_dir / "gaussian_manifest.tsv", gaussian_inputs)
-        _write_iteration_manifest(iteration_dir, sampler_kind, counts, config, state)
 
         gjf_files = sorted(gjf_dir.rglob("*.gjf"))
         if not gjf_files:
@@ -390,6 +424,8 @@ def run_one_iteration(
             train_denominator=config.finetune.train_denominator,
             require_normal_termination=config.finetune.require_normal_termination,
             sevennet_label=f"gaussian_iter_{state.iteration:04d}",
+            split_manifest_path=work_dir / "split_manifest.json",
+            historical_split_dirs=tuple(work_dir / f"iter_{i:04d}" / "finetune" for i in range(state.iteration)),
         )
         if config.execute_finetune and config.finetune.run_command and not dry_run:
             _run_command(config.finetune.run_command, cwd=finetune_dir, progress=progress)
@@ -407,6 +443,7 @@ def run_one_iteration(
     prepare_sevennet_lammps_from_gro(
         gro_path=config.md.gro_path,
         output_dir=md_dir,
+        continuation_data_path=continuation_data,
         model_path=model_path,
         elements=config.md.elements,
         pair_style=pair_style,  # type: ignore[arg-type]
@@ -422,7 +459,32 @@ def run_one_iteration(
     )
     _write_md_run_script(md_dir, config.md.run_command)
     if config.execute_md and config.md.run_command and not dry_run:
-        _run_command(config.md.run_command, cwd=md_dir, progress=progress)
+        if config.md.export_whole_xtc:
+            for artifact in ("whole.xtc", "whole.gro", "whole_export.json", "whole_export_error.json"):
+                (md_dir / artifact).unlink(missing_ok=True)
+        for artifact in ("md.complete", "final.data"):
+            (md_dir / artifact).unlink(missing_ok=True)
+        try:
+            _run_command(config.md.run_command, cwd=md_dir, progress=progress)
+            completed_md_data(md_dir, config.md.gro_path)
+        except Exception:
+            (md_dir / "md.complete").unlink(missing_ok=True)
+            raise
+        if config.md.export_whole_xtc:
+            from .trajectory_export import export_whole_trajectory
+            try:
+                report = export_whole_trajectory(md_dir / config.md.expected_dump,
+                    config.md.gro_path, config.md.analysis_topology_path, md_dir,
+                    timestep_ps=config.md.timestep_ps)
+                _log(progress, f"[analysis] wrote {report['frames']} whole-molecule frames to {md_dir / 'whole.xtc'}")
+            except Exception as exc:
+                # Analysis output must not invalidate completed MD or resubmit DFT on retry.
+                (md_dir / "whole_export_error.json").write_text(json.dumps({
+                    "error": str(exc), "dump": str(md_dir / config.md.expected_dump),
+                    "iteration": state.iteration,
+                }, indent=2) + "\n", encoding="utf-8")
+                import warnings
+                warnings.warn(f"Analysis XTC export failed; MD remains complete: {exc}", stacklevel=2)
 
 
 def update_dft_jobs(
@@ -572,6 +634,10 @@ def load_loop_config(path: str | Path) -> LoopConfig:
             submit=bool(dft.get("submit", True)),
         ),
         sampling=SamplingConfig(
+            mode=str(sampling.get("mode", "film")),
+            solute_resnames=tuple(sampling.get("solute_resnames", [])),
+            solvent_resnames=tuple(sampling.get("solvent_resnames", [])),
+            solution_solute_weights=_int_key_dict(sampling.get("solution_solute_weights", {"0": 0.25, "1": 0.75})),
             initial_total=int(sampling.get("initial_total", 24)),
             min_total=int(sampling.get("min_total", 4)),
             max_total=int(sampling.get("max_total", 96)),
@@ -592,6 +658,7 @@ def load_loop_config(path: str | Path) -> LoopConfig:
         ),
         md=MdConfig(
             gro_path=str(md.get("gro_path", "YCOL160.gro")),
+            start_mode=str(md.get("start_mode", "previous")),
             xtc_path=None if md.get("xtc_path") is None else str(md.get("xtc_path")),
             model_path=str(md.get("model_path", "7net-omni")),
             modal=str(md.get("modal", "omol25_low")),
@@ -609,6 +676,8 @@ def load_loop_config(path: str | Path) -> LoopConfig:
             d3=bool(md.get("d3", False)),
             run_command=str(md.get("run_command", DEFAULT_MD_RUN_COMMAND)),
             expected_dump=str(md.get("expected_dump", "dump.sevennet.lammpstrj")),
+            export_whole_xtc=bool(md.get("export_whole_xtc", False)),
+            analysis_topology_path=str(md["analysis_topology_path"]) if md.get("analysis_topology_path") else None,
         ),
         finetune=FinetuneConfig(
             pretrained=str(finetune.get("pretrained", "7net-omni")),
@@ -697,7 +766,7 @@ def _prepare_md_model(
 
     deployed_dir = _absolute_path(md_dir / "deployed_parallel")
     deploy_command = _sevennet_parallel_deploy_command(
-        checkpoint=str(model_path),
+        checkpoint=resolve_checkpoint(str(model_path)),
         modal=config.md.modal,
         output_dir=deployed_dir,
         enable_flash=config.md.enable_flash,
@@ -719,7 +788,7 @@ def _write_md_run_script(md_dir: Path, command: str | None) -> None:
     if not command:
         return
     (md_dir / "run_md.sh").write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\n\n" + command.rstrip() + "\n",
+        '#!/usr/bin/env bash\nset -euo pipefail\n\ncd -- "$(dirname -- "$0")"\nrm -f -- md.complete final.data\ntrap "rm -f -- md.complete" ERR\n' + command.rstrip() + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -730,12 +799,18 @@ def _absolute_path(path: Path) -> Path:
 
 
 def _select_model_path(config: LoopConfig, iteration_dir: Path) -> str:
-    latest_serial = iteration_dir / "finetune" / "deployed_serial.pt"
-    latest_parallel = iteration_dir / "finetune" / "deployed_parallel"
-    if config.md.pair_style == "e3gnn/parallel" and latest_parallel.is_dir():
-        return str(latest_parallel)
-    if config.md.pair_style != "e3gnn/parallel" and latest_serial.is_file():
-        return str(latest_serial)
+    # Retain the last successfully deployed model when no new labels are ready.
+    current = int(iteration_dir.name.removeprefix("iter_"))
+    for iteration in range(current, -1, -1):
+        finetune_dir = iteration_dir.parent / f"iter_{iteration:04d}" / "finetune"
+        if config.md.pair_style == "e3gnn/parallel":
+            model = finetune_dir / "deployed_parallel"
+            if model.is_dir() and any(model.glob("deployed_parallel_*.pt")):
+                return str(model)
+        else:
+            model = finetune_dir / "deployed_serial.pt"
+            if model.is_file():
+                return str(model)
     return config.md.model_path
 
 
@@ -748,7 +823,7 @@ def _select_finetune_pretrained(
     checkpoint = _latest_previous_finetune_checkpoint(work_dir, current_iteration)
     if checkpoint is not None:
         return str(_absolute_path(checkpoint))
-    return config.finetune.pretrained
+    return resolve_checkpoint(config.finetune.pretrained)
 
 
 def _latest_previous_finetune_checkpoint(work_dir: Path, current_iteration: int) -> Path | None:
@@ -876,6 +951,10 @@ def _write_iteration_manifest(
         "iteration": state.iteration,
         "created_at": _utc_now(),
         "sampler": sampler_kind,
+        "sampling_mode": config.sampling.mode,
+        "solute_resnames": config.sampling.solute_resnames,
+        "solvent_resnames": config.sampling.solvent_resnames,
+        "solution_solute_weights": config.sampling.solution_solute_weights,
         "cluster_counts": counts,
         "cluster_weights": weights,
         "dft_nodes": list(config.dft.nodes),

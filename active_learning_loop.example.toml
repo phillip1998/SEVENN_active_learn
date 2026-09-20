@@ -20,6 +20,13 @@ nprocshared = 16
 submit = true
 
 [sampling]
+# film preserves the original sampler. solution stratifies by solute count.
+mode = "film"
+# In solution mode, replace with the exact, case-sensitive GRO residue names.
+solute_resnames = []
+solvent_resnames = []
+# Keys = solute molecules per cluster, values = relative sampling weights.
+solution_solute_weights = { "0" = 0.25, "1" = 0.75 }
 initial_total = 24
 min_total = 4
 max_total = 96
@@ -39,6 +46,11 @@ hard_reject_distance_angstrom = 0.55
 random_seed = 17
 
 [md]
+# previous continues coordinates, cell and velocities after iteration 0.
+start_mode = "previous"
+# Enable after providing a bonded topology matching GRO atom order/count.
+export_whole_xtc = false
+analysis_topology_path = ""
 gro_path = "YCOL160.gro"
 xtc_path = "YCOL160.xtc"
 model_path = "7net-omni"
